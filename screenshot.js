@@ -1,5 +1,6 @@
-// meta z STRATZ GraphQL -> vygenerujeme vlastnú HTML tabuľku -> screenshot -> Discord
+// STRATZ meta cez GraphQL -> vlastné HTML -> screenshot -> Discord webhook
 import { chromium } from "playwright";
+import fs from "node:fs";
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const STRATZ_TOKEN = process.env.STRATZ_TOKEN;
@@ -12,6 +13,21 @@ const MIN_MATCHES = 30;
 
 const CDN = "https://cdn.cloudflare.steamstatic.com";
 const OD_HEROES = "https://api.opendota.com/api/constants/heroes";
+const STRATZ_GQL = "https://api.stratz.com/graphql";
+
+const QUERY = `
+  query MetaByRole($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
+    heroPerformance(
+      request: {
+        dateTime: { min: $from, max: $to }
+        rankBracket: [$rank]
+        positions: [$pos]
+        lobbyTypeIds: [7]   # ranked
+        isParsed: true
+      }
+    ) { heroId winCount matchCount }
+  }
+`;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -43,21 +59,6 @@ async function getHeroMap() {
   return map;
 }
 
-const STRATZ_GQL = "https://api.stratz.com/graphql";
-const QUERY = `
-  query MetaByRole($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
-    heroPerformance(
-      request: {
-        dateTime: { min: $from, max: $to }
-        rankBracket: [$rank]
-        positions: [$pos]
-        lobbyTypeIds: [7]
-        isParsed: true
-      }
-    ) { heroId winCount matchCount }
-  }
-`;
-
 async function fetchRoleData(role, rank, fromMs, toMs) {
   const pos = ROLE_TO_POSITION[role] ?? 2;
   const res = await fetch(STRATZ_GQL, {
@@ -70,10 +71,7 @@ async function fetchRoleData(role, rank, fromMs, toMs) {
       "Referer": "https://stratz.com/",
       "User-Agent": "DotaMetaBot/1.0"
     },
-    body: JSON.stringify({
-      query: QUERY,
-      variables: { from: fromMs, to: toMs, rank, pos }
-    })
+    body: JSON.stringify({ query: QUERY, variables: { from: fromMs, to: toMs, rank, pos } })
   });
   if (!res.ok) throw new Error(`STRATZ ${res.status}: ${await res.text()}`);
   const body = await res.json();
@@ -113,7 +111,6 @@ function htmlTemplate(label, sections, heroes) {
     .wr.bad { color:#ef4444; font-weight:700; }
     footer { margin-top:12px; color:#93a0b4; font-size:12px; }
   `;
-
   const roleName = r => ({safe:"Safe Lane",mid:"Mid",off:"Offlane",soft:"Soft Support",hard:"Hard Support"})[r]||r;
 
   const makeTable = (role, rows) => {
@@ -165,35 +162,31 @@ async function buildImageAndSend() {
   const { startMs, endMs, label } = yesterdayUtcRangeMS();
   const heroes = await getHeroMap();
 
-  // načítaj dáta pre všetky roly
   const sections = [];
   for (const role of ROLES) {
     let rows = await fetchRoleData(role, RANK, startMs, endMs);
     if (!rows?.length) {
-      // fallback: 3 dni okno, bez lobby filtra (zriedka treba)
+      // fallback: 3-dňové okno (ak včera málo ranked dát)
       const threeDaysAgo = startMs - 2*24*3600*1000;
       rows = await fetchRoleData(role, RANK, threeDaysAgo, endMs).catch(()=>[]);
     }
     sections.push({ role, rows: topRows(rows, LIMIT) });
-    await sleep(200); // malý odstup
+    await sleep(150);
   }
 
-  // priprav HTML
   const html = htmlTemplate(label, sections, heroes);
 
-  // render v Playwright-e (lokálne, žiadny login netreba)
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 1400 } });
   const page = await ctx.newPage();
   await page.setContent(html, { waitUntil: "load" });
-  // ak je obsah dlhší, dáme fullPage
+
   const path = "meta.png";
   await page.screenshot({ path, type: "png", fullPage: true });
   await browser.close();
 
-  // pošli do Discordu
-  const buf = await (await fetch("file://" + path).catch(()=>({arrayBuffer:async()=>[]}))).arrayBuffer().catch(()=>null);
-  // Node 20 má FormData/Blob globálne
+  // pošli do Discordu (prečítaj PNG z disku cez fs)
+  const buf = fs.readFileSync(path);
   const form = new FormData();
   form.append("payload_json", JSON.stringify({
     username: "Dota META",
@@ -203,6 +196,7 @@ async function buildImageAndSend() {
     }]
   }));
   form.append("file", new Blob([buf], { type: "image/png" }), "meta.png");
+
   const res = await fetch(DISCORD_WEBHOOK_URL, { method: "POST", body: form });
   if (!res.ok) throw new Error(`Discord webhook failed: ${res.status} ${await res.text().catch(()=> "")}`);
 }
