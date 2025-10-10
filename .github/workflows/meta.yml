@@ -9,21 +9,31 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
+          cache: 'npm'
 
-      - name: Install Playwright (Chromium)
-        run: npx playwright install --with-deps chromium
+      - name: Install browsers (cached)
+        uses: microsoft/playwright-github-action@v1
+        with:
+          with-deps: true
 
       - name: Install deps
-        run: npm install   # <— namiesto "npm ci"
+        run: npm install
 
+      # ⇩⇩⇩ Sem vlož kontrolný krok na secrets ⇩⇩⇩
+      - name: Check STRATZ_TOKEN presence
+        run: echo "Has STRATZ_TOKEN? ${{ secrets.STRATZ_TOKEN != '' }}"
+
+      - name: Check DISCORD_WEBHOOK_URL presence
+        run: echo "Has DISCORD_WEBHOOK_URL? ${{ secrets.DISCORD_WEBHOOK_URL != '' }}"
+
+      # Až potom spúšťaj skript
       - name: Run screenshot + send to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: node screenshot.js  # alebo: npm run scrape
+          STRATZ_TOKEN: ${{ secrets.STRATZ_TOKEN }}
+        run: node screenshot.js
