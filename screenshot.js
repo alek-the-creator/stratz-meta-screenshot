@@ -4,7 +4,14 @@ import fs from "node:fs";
 
 const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
 const PAGE_URL = process.env.PAGE_URL || "https://dota2protracker.com/";
-const SELECTOR = process.env.SCREENSHOT_SELECTOR || ""; // ak chceš presne tvoj CSS
+const SELECTOR = process.env.SCREENSHOT_SELECTOR || ""; // ak chceš, daj sem presný CSS selector
+
+// Tvoje nastavenia výzoru správy
+const BOT_NAME   = "Current meta agent";
+const AVATAR_URL = "https://github.com/alek-the-creator/stratz-meta-screenshot/blob/94b289177522e83cc593958fd21b441ea1050f5a/-1x-1.jpg";
+const EMBED_TITLE = "Dnešná meta je:";
+const EMBED_DESC  = "Implemented with ♥ by @trauma";
+
 const VIEWPORT_W = Number(process.env.VIEWPORT_W || 1600);
 const VIEWPORT_H = Number(process.env.VIEWPORT_H || 1200);
 const WAIT_MS    = Number(process.env.WAIT_MS || 2000);
@@ -24,33 +31,32 @@ async function run() {
   await page.waitForLoadState("networkidle").catch(() => {});
   await page.waitForTimeout(WAIT_MS);
 
-  // (nech nič nezakrýva uzol)
+  // Skryť sticky/ads, aby nezakrývali uzol
   await page.addStyleTag({
     content: `
       header, .sticky, .fixed, [class*="sticky"], [class*="Fixed"], [class*="fixed"] { z-index: 0 !important; }
-      [aria-label*="ad"], .ad, .ads, [id*="ad"] { display:none !important; }`
+      [aria-label*="ad"], .ad, .ads, [id*="ad"] { display:none !important; }
+    `
   }).catch(()=>{});
 
-  // 1) Najdi element: preferuj tvoj CSS selektor; inak automaticky nájdi kontajner tej sekcie
+  // Nájsť cieľový uzol (buď presný selector, alebo automaticky podľa nadpisu)
   let target = null;
   if (SELECTOR) {
     const loc = page.locator(SELECTOR).first();
     if (await loc.count()) target = loc;
   }
   if (!target) {
-    // auto: nájdi nadpis a vyšli hore na spoločný kontajner sekcie
     const title = page.getByRole("heading", { name: /Most Successful Heroes by Role/i }).first();
     if (await title.count()) {
       const handle = await title.elementHandle();
       const container = await page.evaluateHandle((h) => {
-        // vylez hore, kým rodič neobsahuje viac kariet s percentami
         let el = h;
         while (el && el.parentElement) {
           const p = el.parentElement;
           const txt = (p.textContent || "");
           const pctCount = (txt.match(/%/g) || []).length;
           const heroLinks = p.querySelectorAll('a[href*="/hero/"]').length;
-          if (pctCount >= 12 && heroLinks >= 6) return p; // dosť údajov = sekcia
+          if (pctCount >= 12 && heroLinks >= 6) return p; // pravdepodobne celá sekcia
           el = p;
         }
         return h;
@@ -60,41 +66,50 @@ async function run() {
   }
   if (!target) throw new Error("Target element not found");
 
-  // 2) Presne ako DevTools: screenshot iba daného uzla
-  const path = "node.png";
-  // locator.screenshot automaticky poscrolluje, netreba clip
-  const loc = target.asElement ? target : target; // support pre Locator/ElementHandle
-  await (loc.screenshot ? loc.screenshot({ path }) : page.locator(SELECTOR).screenshot({ path }));
+  // Element screenshot (ako DevTools "Capture node screenshot")
+  const outFile = "node.png";
+  const loc = target.screenshot ? target : page.locator(SELECTOR);
+  await loc.screenshot({ path: outFile });
 
   await browser.close();
 
-  // 3) Pošli do Discordu
-  const buf = fs.readFileSync(path);
+  // Odoslanie do Discordu
+  const buf = fs.readFileSync(outFile);
   const form = new FormData();
   form.append("payload_json", JSON.stringify({
-    username: "Web Snapshot",
+    username: BOT_NAME,
+    ...(AVATAR_URL ? { avatar_url: AVATAR_URL } : {}),
     embeds: [{
-      title: "Section snapshot",
-      description: `URL: ${PAGE_URL}\nSelector: ${SELECTOR || "(auto by heading)"}`,
-      image: { url: "attachment://node.png" }
+      title: EMBED_TITLE,
+      description: EMBED_DESC,
+      image: { url: `attachment://${outFile}` },
+      color: 0x2b6cb0
     }]
   }));
-  form.append("file", new Blob([buf], { type: "image/png" }), "node.png");
+  form.append("file", new Blob([buf], { type: "image/png" }), outFile);
+
   const res = await fetch(WEBHOOK, { method: "POST", body: form });
   if (!res.ok) throw new Error(`Discord webhook failed: ${res.status}`);
 }
 
 run().catch(async (e) => {
   console.error(e);
-  if (WEBHOOK) {
+  // aj pri chybe pošleme stručnú hlášku v rovnakom štýle
+  try {
+    const payload = {
+      username: BOT_NAME,
+      ...(AVATAR_URL ? { avatar_url: AVATAR_URL } : {}),
+      embeds: [{
+        title: EMBED_TITLE,
+        description: `${EMBED_DESC}\n\n⚠️ Error: ${String(e)}`,
+        color: 0xcc0000
+      }]
+    };
     await fetch(WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: "Web Snapshot",
-        embeds: [{ title: "Snapshot error", description: String(e) }]
-      })
-    }).catch(()=>{});
-  }
+      body: JSON.stringify(payload)
+    });
+  } catch {}
   process.exit(1);
 });
