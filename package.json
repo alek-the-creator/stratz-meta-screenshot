@@ -4,10 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "scrape": "node screenshot.js",
-    "pw:install": "npx playwright install --with-deps chromium"
+    "scrape": "node screenshot.js"
   },
   "dependencies": {
-    "playwright": "^1.47.2"
+    "playwright": "1.56.0"
   }
 }
