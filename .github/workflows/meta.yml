@@ -2,13 +2,13 @@ name: Daily STRATZ Meta Screenshot
 
 on:
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "0 7 * * *"   # 07:00 UTC
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    container: mcr.microsoft.com/playwright:v1.47.2-jammy   # Playwright image s Chromium
+    container: mcr.microsoft.com/playwright:v1.56.0-jammy  # ⚠️ zosúladené s deps
     steps:
       - uses: actions/checkout@v4
 
