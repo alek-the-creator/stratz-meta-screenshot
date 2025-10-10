@@ -2,14 +2,12 @@ name: Daily STRATZ Meta Screenshot
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # 07:00 UTC (u nás ~08:00 v zime / ~09:00 v lete)
-  workflow_dispatch:       # aby si to vedel spustiť aj ručne
+    - cron: "0 7 * * *"
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,12 +18,12 @@ jobs:
           node-version: "20"
 
       - name: Install Playwright (Chromium)
-        run: npm run pw:install
+        run: npx playwright install --with-deps chromium
 
       - name: Install deps
-        run: npm ci
+        run: npm install   # <— namiesto "npm ci"
 
       - name: Run screenshot + send to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: npm run scrape
+        run: node screenshot.js  # alebo: npm run scrape
