@@ -1,5 +1,4 @@
-// Scrape Dota2ProTracker -> render vlastné HTML -> screenshot -> Discord
-// Env: DISCORD_WEBHOOK_URL, PAGE_URL (default https://dota2protracker.com/)
+// Dota2ProTracker -> scrape presnej sekcie -> vlastné HTML -> screenshot -> Discord
 import { chromium } from "playwright";
 import fs from "node:fs";
 
@@ -8,171 +7,153 @@ const PAGE_URL = process.env.PAGE_URL || "https://dota2protracker.com/";
 
 if (!WEBHOOK) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
-// vzhľad a výstup
 const VIEWPORT = { width: 1400, height: 1400 };
-const PAD = 0;
 
-// mapovanie rolí do nášho layoutu
-const ROLE_KEYS = [
-  { label: "Carry", key: "safe" },
-  { label: "Mid", key: "mid" },
-  { label: "Offlane", key: "off" },
-  { label: "Support (4)", key: "soft" },
-  { label: "Support (5)", key: "hard" },
-  // "Overall" nepoužijeme do gridu – buď ho ignoruj, alebo ho vieš pridať zvlášť
-];
-
-// Na obrázky hrdinov použijeme Steam CDN cez OpenDota mapu
-const CDN = "https://cdn.cloudflare.steamstatic.com";
-const OD_HEROES = "https://api.opendota.com/api/constants/heroes";
-
-// ---------- helpers ----------
+// ---- util ----
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-function pctToNum(s){ const m = String(s).match(/(\d+(?:\.\d+)?)\s*%/); return m ? Number(m[1]) : null; }
-function matchesToNum(s){
-  // "2.3K" -> 2300, "908" -> 908
+function pctNum(s){ const m = String(s).match(/(\d+(?:\.\d+)?)\s*%/); return m ? +m[1] : null; }
+function matchesNum(s){
   const m = String(s).trim().match(/^(\d+(?:\.\d+)?)([kKmM]?)$/);
   if(!m) return null;
-  let n = Number(m[1]);
+  let n = +m[1];
   const suf = m[2].toLowerCase();
   if (suf === "k") n *= 1000;
   if (suf === "m") n *= 1_000_000;
   return Math.round(n);
 }
 
-// ---------- načítanie OpenDota hero mapy ----------
-async function getHeroMap() {
-  const res = await fetch(OD_HEROES);
-  if (!res.ok) throw new Error("OpenDota heroes failed: " + res.status);
+// ---- OpenDota hero map (na ikony + oficiálne mená) ----
+const CDN = "https://cdn.cloudflare.steamstatic.com";
+const OD_HEROES = "https://api.opendota.com/api/constants/heroes";
+async function getHeroMaps(){
+  const res = await fetch(OD_HEROES); if(!res.ok) throw new Error("OpenDota heroes " + res.status);
   const data = await res.json();
-  const map = new Map();
-  for (const [id, h] of Object.entries(data)) {
-    const short = h.name?.replace("npc_dota_hero_", "");
-    map.set(h.localized_name, {
-      name: h.localized_name,
-      img: short ? `${CDN}/apps/dota2/images/heroes/${short}_full.png` : null
-    });
-    // pridať aj variant s diakritikou/medzerami znormalizovaný
-    map.set(h.localized_name.replace(/’/g,"'"), {
-      name: h.localized_name,
-      img: short ? `${CDN}/apps/dota2/images/heroes/${short}_full.png` : null
-    });
+  const byLocalized = new Map();
+  const bySlug = new Map(); // anti-mage, queen-of-pain (hypheny)
+  const list = [];
+  for (const h of Object.values(data)) {
+    const short = h.name.replace("npc_dota_hero_", "");          // anti_mage
+    const slug = short.replace(/_/g, "-");                       // anti-mage
+    const loc  = h.localized_name;
+    const img  = `${CDN}/apps/dota2/images/heroes/${short}_full.png`;
+    byLocalized.set(loc, { name: loc, img, slug });
+    bySlug.set(slug,       { name: loc, img, slug });
+    list.push({ name: loc, norm: normalizeText(loc), img, slug });
   }
-  return map;
+  return { byLocalized, bySlug, list };
 }
 
-// ---------- scraping jadro (v prehliadači) ----------
-async function scrapeD2PT(page){
-  // nájdi sekciu s týmto nadpisom
-  const title = page.getByRole("heading", { name: /Most Successful Heroes by Role/i }).first();
-  await title.waitFor({ timeout: 15000 });
-  // daj stránke čas dotiahnuť čísla
-  await page.waitForLoadState("networkidle").catch(()=>{});
-  await page.waitForTimeout(1000);
-
-  // Vyškriabeme dáta robustne: buď po blokoch (karty), alebo priamo z textu
-  const data = await page.evaluate(() => {
-    const out = {};
-    const byRole = role => (out[role] = out[role] || []);
-
-    // nájdi kontajner sekcie (parent so slušnou šírkou a viacerými percentami)
-    const heading = Array.from(document.querySelectorAll("h2,h3"))
-      .find(h => /Most Successful Heroes by Role/i.test(h.textContent || ""));
-    if(!heading) return out;
-    let sec = heading.parentElement;
-    while(sec && (sec.querySelectorAll("h3,h4").length < 3 || sec.getBoundingClientRect().width < 600)){
-      sec = sec.parentElement;
+// jednoduchá normalizácia + „fuzzy“ vzdialenosť
+function normalizeText(s){ return String(s).toLowerCase().replace(/[^a-z\s]/g,'').replace(/\s+/g,' ').trim(); }
+function levenshtein(a,b){
+  a = normalizeText(a); b = normalizeText(b);
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, (_,i)=>Array(n+1).fill(0));
+  for (let i=0;i<=m;i++) dp[i][0]=i;
+  for (let j=0;j<=n;j++) dp[0][j]=j;
+  for (let i=1;i<=m;i++){
+    for (let j=1;j<=n;j++){
+      const cost = a[i-1]===b[j-1]?0:1;
+      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
     }
-    if(!sec) sec = heading.closest("section") || heading.parentElement;
+  }
+  return dp[m][n];
+}
+function bestHeroMatch(candidate, heroList){
+  if (!candidate) return null;
+  const candNorm = normalizeText(candidate);
+  if (!candNorm) return null;
+  let best = null, bestScore = Infinity;
+  for (const h of heroList){
+    const d = levenshtein(candNorm, h.norm);
+    if (d < bestScore){ bestScore = d; best = h; }
+  }
+  // tolerancia: krátke mená do 1–2 chýb, dlhšie do ~3–4
+  if (bestScore <= Math.max(2, Math.ceil(best.norm.length * 0.2))) return best;
+  return null;
+}
 
-    // 1) primárne: karty pre jednotlivé role
-    const roleTitles = ["Overall","Carry","Mid","Offlane","Support (4)","Support (5)"];
-    const cards = roleTitles.map(rt => {
-      // element, ktorý obsahuje daný titul a zároveň má viac '%'
-      const el = Array.from(sec.querySelectorAll("*")).find(e => {
-        const t = (e.textContent || "").trim();
-        return t.startsWith(rt) && (t.match(/%/g) || []).length >= 3;
-      });
-      return { role: rt, el };
-    });
+// ---- scraping v prehliadači (presné selektory) ----
+async function scrapeD2PT(page){
+  // nájdi sekciu „Most Successful Heroes by Role“
+  const title = page.getByRole("heading", { name: /Most Successful Heroes by Role/i }).first();
+  await title.waitFor({ timeout: 15000 }).catch(()=>{});
+  await page.waitForLoadState("networkidle").catch(()=>{});
+  await sleep(800);
 
-    const parseCard = (el, role) => {
-      if(!el) return;
-      // kandidáti na riadky — často <a> alebo <div> s ikonou + WR + matches
-      const rows = Array.from(el.querySelectorAll("a,div"))
-        .filter(n => (n.textContent || "").match(/%/));
-      // vezmeme 6 prvých unikátnych, kde vieme vyextrahovať meno + wr + matches
-      const seen = new Set();
+  return await page.evaluate(() => {
+    const out = {};
+    const ensure = r => (out[r] = out[r] || []);
+    const roles = ["Overall","Carry","Mid","Offlane","Support (4)","Support (5)"];
+
+    function findSectionRoot(){
+      const heading = Array.from(document.querySelectorAll("h2,h3"))
+        .find(h => /Most Successful Heroes by Role/i.test(h.textContent||""));
+      if (!heading) return null;
+      let sec = heading.parentElement;
+      while (sec && (sec.querySelectorAll("img[alt]").length < 5 || sec.querySelectorAll("table, a").length < 10)) {
+        sec = sec.parentElement;
+      }
+      return sec || heading.closest("section") || heading.parentElement;
+    }
+
+    const sec = findSectionRoot();
+    if (!sec) return out;
+
+    function pickRows(cardEl){
+      // riadky sú väčšinou <a> alebo <div> s ikonou, menom, WR a matches
+      const rows = Array.from(cardEl.querySelectorAll("a,div"))
+        .filter(n => (n.querySelector('img[alt]') || (n.textContent||"").match(/%/)))
+        .slice(0, 20);
       const items = [];
-      for (const r of rows) {
-        let text = (r.textContent || "").replace(/\u00a0/g," ").trim();
-        // vyber prvú % hodnotu a číslo (matches)
-        const wrm = text.match(/(\d+(?:\.\d+)?)\s*%/);
-        const mm = text.match(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/); // posledné číslo v riadku
-        // meno odhadneme ako prvý token s písmenami pred WR/matches
-        // zoberieme text do prvého % a z neho posledný nenumerický blok
-        let name = text.split("%")[0]
-          .replace(/[\d\.,kKmM]/g,"")  // odstráň čísla/sufixy
-          .replace(/\s+/g," ")
-          .trim();
-        // odseknúť prípadné ikonky/emoji
-        name = name.replace(/^[^\w]*|[^\w\s'-].*$/g, "").trim();
-        if (!name || !wrm || !mm) continue;
-        if (name.length > 28) continue; // šum
+      const seen = new Set();
+      for (const r of rows){
+        const img = r.querySelector('img[alt]');
+        const alt = img?.getAttribute('alt')?.trim();
+        const link = r.closest('a') || r.querySelector('a[href*="/hero/"]');
+        const href = link?.getAttribute('href')||"";
+        let slug = null;
+        const mSlug = href.match(/\/hero\/([^/?#]+)/i);
+        if (mSlug) slug = decodeURIComponent(mSlug[1].toLowerCase()); // napr. anti-mage
+        const wrM = (r.textContent||"").match(/(\d+(?:\.\d+)?)\s*%/);
+        const matchesM = (r.textContent||"").match(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/);
 
-        if (seen.has(name)) continue;
-        seen.add(name);
+        // meno – preferuj alt, potom text pred WR
+        let name = alt || "";
+        if (!name) {
+          const beforePct = (r.textContent||"").split("%")[0]||"";
+          name = beforePct.replace(/[\d\.,kKmM]/g,"").replace(/\s+/g," ").trim();
+          name = name.replace(/^[^\w]*|[^\w\s'-].*$/g, "").trim();
+        }
+
+        if (!wrM || !matchesM) continue;
+        if (!name && !slug) continue;
+        if (name && seen.has(name.toLowerCase())) continue;
 
         items.push({
-          name,
-          wr: Number(wrm[1]),
-          matches: mm[1].replace(/\s+/g,"").toUpperCase()
+          name, slug,
+          wr: wrM[1], matches: matchesM[1].toUpperCase()
         });
+        if (name) seen.add(name.toLowerCase());
         if (items.length >= 6) break;
       }
-      if (items.length) byRole(role).push(...items);
-    };
-
-    for (const {role, el} of cards) parseCard(el, role);
-
-    // 2) fallback: ak niektorá rola nič nenašla, skús textový rozpad podľa hlavičiek
-    for (const rt of roleTitles) {
-      if ((out[rt] || []).length) continue;
-      const blockEl = Array.from(sec.querySelectorAll("*")).find(e => {
-        const t = (e.textContent || "").trim();
-        return t.startsWith(rt) && t.split("%").length > 2;
-      });
-      if (!blockEl) continue;
-      const text = (blockEl.textContent || "").replace(/\u00a0/g," ");
-      // heuristika: zober riadky po role title, filtre na percentá
-      const lines = text.split("\n").map(s=>s.trim()).filter(Boolean);
-      const start = lines.findIndex(l => l === rt);
-      const slice = start >= 0 ? lines.slice(start+1) : lines;
-      const items = [];
-      for (let i=0; i<slice.length-2; i++){
-        const maybeName = slice[i];
-        const hasPct = /%/.test(slice[i+1]) || /%/.test(slice[i+2]);
-        const hasNum = /(\d+(?:\.\d+)?\s*[kKmM]?)/.test(slice[i+1]) || /(\d+(?:\.\d+)?\s*[kKmM]?)/.test(slice[i+2]);
-        if (/^\d|%/.test(maybeName)) continue;
-        if (!hasPct || !hasNum) continue;
-        const wrStr = (slice[i+1].match(/(\d+(?:\.\d+)?)\s*%/) || slice[i+2]?.match(/(\d+(?:\.\d+)?)\s*%/) || [])[0];
-        const mStr  = (slice[i+1].match(/(\d+(?:\.\d+)?\s*[kKmM]?)/) || slice[i+2]?.match(/(\d+(?:\.\d+)?\s*[kKmM]?)/) || [])[0];
-        if (wrStr && mStr) {
-          items.push({ name: maybeName, wr: Number(wrStr.replace("%","")), matches: mStr.toUpperCase() });
-        }
-        if (items.length >= 6) break;
-      }
-      if (items.length) byRole(rt).push(...items);
+      return items;
     }
 
+    for (const role of roles){
+      const card = Array.from(sec.querySelectorAll("*")).find(e => {
+        const t = (e.textContent||"").trim();
+        return t.startsWith(role) && (t.match(/%/g)||[]).length >= 3;
+      });
+      if (!card) continue;
+      ensure(role).push(...pickRows(card));
+    }
     return out;
   });
-
-  return data;
 }
 
-// ---------- render nášho dizajnu ----------
-function htmlTemplate(label, sections, heroMap) {
+// ---- náš layout ----
+function htmlTemplate(label, sections){
   const css = `
     body { background:#0b0e13; color:#e6e9ef; font:14px/1.45 Inter,system-ui,Segoe UI,Roboto,Arial; padding:24px; }
     h1 { margin:0 0 16px; font-size:20px; }
@@ -192,18 +173,13 @@ function htmlTemplate(label, sections, heroMap) {
   `;
   const roleName = k => ({safe:"Safe Lane",mid:"Mid",off:"Offlane",soft:"Soft Support",hard:"Hard Support"})[k]||k;
 
-  const makeRows = rows => rows.map((r,i)=>{
-    const h = heroMap.get(r.name) || heroMap.get(r.name.replace(/’/g,"'")) || {};
-    const matches = matchesToNum(r.matches);
-    const cls = (r.wr >= 50) ? "wr good" : "wr bad";
-    return `
+  const makeRows = rows => rows.map((r,i)=>`
       <tr>
         <td style="width:34px">${String(i+1).padStart(2," ")}</td>
-        <td><div class="hero">${h.img?`<img src="${h.img}" alt="${h.name}">`:``}<span>${r.name}</span></div></td>
-        <td class="${cls}">${r.wr.toFixed(1)}%</td>
-        <td>${(matches!=null)? (matches>=1000?Math.round(matches/100)/10+'k':matches): r.matches}</td>
-      </tr>`;
-  }).join("");
+        <td><div class="hero">${r.img?`<img src="${r.img}" alt="${r.name}">`:``}<span>${r.name}</span></div></td>
+        <td class="${r.wr>=50?'wr good':'wr bad'}">${r.wr.toFixed(1)}%</td>
+        <td>${r.games>=1000 ? Math.round(r.games/100)/10+'k' : r.games}</td>
+      </tr>`).join("");
 
   const makeCard = (key, rows) => `
     <div class="card">
@@ -214,55 +190,75 @@ function htmlTemplate(label, sections, heroMap) {
       </table>
     </div>`;
 
-  const cards = sections.map(s => makeCard(s.key, s.rows)).join("");
+  const grid = sections.map(s => makeCard(s.key, s.rows)).join("");
 
   return `
   <html><head><meta charset="utf-8"><style>${css}</style></head>
   <body>
     <h1>Dota2ProTracker META • ${label}</h1>
-    <div class="grid">${cards}</div>
+    <div class="grid">${grid}</div>
     <div class="muted">Source: dota2protracker.com • scraped & rendered automatically</div>
   </body></html>`;
 }
 
-// ---------- main ----------
-async function main() {
+// ---- main flow ----
+async function main(){
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: VIEWPORT });
-  const page = await context.newPage();
+  const ctx = await browser.newContext({ viewport: VIEWPORT });
+  const page = await ctx.newPage();
 
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 120_000 });
   await page.waitForLoadState("networkidle").catch(()=>{});
-  await page.waitForTimeout(2000);
+  await sleep(1500);
 
-  const scraped = await scrapeD2PT(page); // { "Carry":[...], "Mid":[...], ... }
+  const raw = await scrapeD2PT(page);
   await browser.close();
 
-  // zlož sekcie podľa ROLE_KEYS
-  const label = new Date().toISOString().slice(0,10);
-  const heroMap = await getHeroMap();
-  const sections = ROLE_KEYS.map(({label:src,key}) => {
-    const items = (scraped[src] || []).slice(0,6).map(x => ({
-      name: x.name,
-      wr: typeof x.wr === "number" ? x.wr : pctToNum(x.wr) || 0,
-      matches: x.matches
-    }));
+  const { byLocalized, bySlug, list } = await getHeroMaps();
+
+  // mapovanie rolí -> náš grid (bez "Overall")
+  const ROLE_ORDER = [
+    { src:"Carry", key:"safe" },
+    { src:"Mid", key:"mid" },
+    { src:"Offlane", key:"off" },
+    { src:"Support (4)", key:"soft" },
+    { src:"Support (5)", key:"hard" },
+  ];
+
+  function resolveHero(item){
+    // 1) podľa slug (najpresnejšie)
+    if (item.slug && bySlug.get(item.slug)) return bySlug.get(item.slug);
+    // 2) podľa lokalizovaného mena
+    if (byLocalized.get(item.name)) return byLocalized.get(item.name);
+    // 3) fuzzy match (Anti-age -> Anti-Mage, Puc -> Puck, Earthshaer -> Earthshaker…)
+    const m = bestHeroMatch(item.name, list);
+    if (m) return { name: m.name, img: m.img, slug: m.slug };
+    // 4) fallback – názov z webu, bez obrázka
+    return { name: item.name, img: null, slug: null };
+  }
+
+  const sections = ROLE_ORDER.map(({src,key}) => {
+    const items = (raw[src] || []).slice(0,6).map(it => {
+      const hero = resolveHero(it);
+      const wr = typeof it.wr === "number" ? it.wr : (pctNum(it.wr) ?? 0);
+      const games = matchesNum(it.matches) ?? 0;
+      return { name: hero.name, img: hero.img, wr, games };
+    });
     return { key, rows: items };
   });
 
-  // render HTML -> screenshot
-  const html = htmlTemplate(label, sections, heroMap);
+  const label = new Date().toISOString().slice(0,10);
+  const html = htmlTemplate(label, sections);
+
   const browser2 = await chromium.launch({ headless: true });
   const ctx2 = await browser2.newContext({ viewport: VIEWPORT });
   const p2 = await ctx2.newPage();
   await p2.setContent(html, { waitUntil: "load" });
   const out = "meta.png";
-  await p2.screenshot({ path: out, type: "png", fullPage: true, clip: PAD?{x:PAD,y:PAD,width:VIEWPORT.width-PAD*2,height:VIEWPORT.height-PAD*2}:undefined }).catch(async()=> {
-    await p2.screenshot({ path: out, type: "png", fullPage: true });
-  });
+  await p2.screenshot({ path: out, type: "png", fullPage: true });
   await browser2.close();
 
-  // => Discord
+  // -> Discord
   const buf = fs.readFileSync(out);
   const form = new FormData();
   form.append("payload_json", JSON.stringify({
