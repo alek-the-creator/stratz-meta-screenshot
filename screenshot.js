@@ -74,71 +74,94 @@ async function scrapeD2PT(page){
     const sec = findSectionRoot();
     if (!sec) return out;
 
-    function extractCard(cardEl){
-      // vezmeme priamo odkazy na hrdinov v tejto karte
-      const anchors = Array.from(cardEl.querySelectorAll('a[href*="/hero/"]'));
-      const rows = [];
+    function dedupeBySlug(rows){
       const seen = new Set();
+      const out = [];
+      for (const r of rows) {
+        if (seen.has(r.slug)) continue;
+        seen.add(r.slug);
+        out.push(r);
+      }
+      return out;
+    }
 
-      for (const a of anchors) {
+    function extractCard(cardEl){
+      // 1) nájdi všetky <a href="/hero/..."> a z nich sprav "riadky"
+      const anchors = Array.from(cardEl.querySelectorAll(':scope a[href*="/hero/"]'));
+      // pre každý anchor nájdi najbližší rodič, ktorý reprezentuje "riadok"
+      const rowsRaw = anchors.map(a => {
         const href = a.getAttribute("href") || "";
         const m = href.match(/\/hero\/([^/?#]+)/i);
-        if (!m) continue;
-        const slug = decodeURIComponent(m[1].toLowerCase()); // napr. anti-mage
-        if (seen.has(slug)) continue;
+        if (!m) return null;
+        const slug = decodeURIComponent(m[1].toLowerCase());
 
-        // nájdi wrapper riadku (spoločný rodič linku a čísiel)
+        // vylez hore kým rodič nemá iný hero anchor (tak dostaneme najmenší kontajner-riadok)
         let row = a;
-        for (let i = 0; i < 4 && row; i++) {
-          if (/%/.test(row.textContent || "")) break;
-          row = row.parentElement;
+        for (let i=0;i<6;i++){
+          const parent = row.parentElement;
+          if (!parent) break;
+          const others = parent.querySelectorAll(':scope a[href*="/hero/"]');
+          if (others.length > 1) break; // už by to bolo viac riadkov naraz
+          row = parent;
         }
-        if (!row) row = a;
+        const rect = row.getBoundingClientRect();
+        return { slug, row, y: rect.top, x: rect.left };
+      }).filter(Boolean);
 
-        // WR a matches z toho istého riadku
+      // zoradíme podľa pozície, vyhodíme duplicitné slugy
+      const byPos = rowsRaw
+        .sort((a,b)=> a.y===b.y ? a.x-b.x : a.y-b.y)
+        .map(r => ({ slug: r.slug, row: r.row }));
+      const uniq = [];
+      const seenSlug = new Set();
+      for (const r of byPos) {
+        if (seenSlug.has(r.slug)) continue;
+        seenSlug.add(r.slug);
+        uniq.push(r);
+      }
+
+      // 2) z každého riadka vytiahni WR a Games
+      let rows = uniq.map(({slug,row}) => {
         const text = (row.textContent || "").replace(/\u00a0/g, " ");
         const wrM = text.match(/(\d+(?:[.,]\d+)?)\s*%/);
-        // posledné číslo v riadku berieme ako matches
-        const matchM = text.match(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/);
+        // posledné číslo v riadku považuj za matches (napr. 3.1k)
+        const gamesM = text.match(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/);
+        return wrM && gamesM ? { slug, wr: wrM[1], matches: gamesM[1].toUpperCase() } : { slug, wr: null, matches: null };
+      });
 
-        // fallback: pozri súrodencov
-        let wrStr = wrM?.[1];
-        let matchesStr = matchM?.[1];
-        if (!wrStr) {
-          const wrEl = Array.from(row.querySelectorAll("span,div"))
-            .map(e=>e.textContent||"").find(t=>/%/.test(t));
-          if (wrEl) wrStr = (wrEl.match(/(\d+(?:[.,]\d+)?)\s*%/)||[])[1];
+      // ak niektoré WR/Games chýbajú, sprav indexový fallback z celej karty
+      if (rows.some(r => !r.wr || !r.matches)) {
+        const cardText = (cardEl.textContent || "").replace(/\u00a0/g," ");
+        const allWR = [...cardText.matchAll(/(\d+(?:[.,]\d+)?)\s*%/g)].map(m=>m[1]);
+        const allGM = [...cardText.matchAll(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/g)].map(m=>m[1].toUpperCase());
+        for (let i=0;i<rows.length;i++){
+          if (!rows[i].wr && allWR[i]) rows[i].wr = allWR[i];
+          if (!rows[i].matches && allGM[i]) rows[i].matches = allGM[i];
         }
-        if (!matchesStr) {
-          const mEl = Array.from(row.querySelectorAll("span,div"))
-            .map(e=>e.textContent||"").find(t=>/\d/.test(t));
-          if (mEl) {
-            const mm = mEl.match(/(\d+(?:\.\d+)?\s*[kKmM]?)(?!.*\d)/);
-            if (mm) matchesStr = mm[1];
-          }
-        }
-
-        if (!wrStr || !matchesStr) continue;
-
-        rows.push({ slug, wr: wrStr.replace(",", "."), matches: matchesStr.toUpperCase() });
-        seen.add(slug);
-        if (rows.length >= 6) break;
       }
+
+      // vyhoď riadky kde sa nepodarilo doplniť čísla
+      rows = rows.filter(r => r.wr && r.matches);
+
+      // necháme prvých 6
+      rows = rows.slice(0, 6);
       return rows;
     }
 
     for (const role of roles) {
-      // nájdi kartu, ktorá začína týmto role titulom
-      const card = Array.from(sec.querySelectorAll("*")).find(e => {
+      const card = Array.from(sec.querySelectorAll(":scope > * , :scope section, :scope div")).find(e => {
         const t = (e.textContent || "").trim();
         return t.startsWith(role) && e.querySelector('a[href*="/hero/"]');
       });
       if (!card) continue;
-      out[role] = extractCard(card);
+      const rows = extractCard(card);
+      // safety: dedupe znova (keby ankory obsahovali duplicitné slugs)
+      out[role] = dedupeBySlug(rows);
     }
     return out;
   });
 }
+
 
 // ---------- render ----------
 function htmlTemplate(label, sections){
