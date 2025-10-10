@@ -1,4 +1,5 @@
 // STRATZ meta cez GraphQL -> vlastné HTML -> screenshot -> Discord webhook
+// Env: DISCORD_WEBHOOK_URL, STRATZ_TOKEN
 import { chromium } from "playwright";
 import fs from "node:fs";
 
@@ -15,32 +16,20 @@ const CDN = "https://cdn.cloudflare.steamstatic.com";
 const OD_HEROES = "https://api.opendota.com/api/constants/heroes";
 const STRATZ_GQL = "https://api.stratz.com/graphql";
 
-const QUERY = `
-  query MetaByRole($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
-    heroPerformance(
-      request: {
-        dateTime: { min: $from, max: $to }
-        rankBracket: [$rank]
-        positions: [$pos]
-        lobbyTypeIds: [7]   # ranked
-        isParsed: true
-      }
-    ) { heroId winCount matchCount }
-  }
-`;
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ---------------- time range: yesterday in ms ----------------
 function yesterdayUtcRangeMS() {
   const now = new Date();
   const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const startMs = todayUtc.getTime() - 24*3600*1000;     // včera 00:00 UTC (ms)
-  const endMs   = todayUtc.getTime() - 1;                // včera 23:59:59.999 (ms)
-  const label = new Date(startMs).toISOString().slice(0,10);
+  const startMs = todayUtc.getTime() - 24 * 3600 * 1000; // včera 00:00 UTC
+  const endMs = todayUtc.getTime() - 1;                  // včera 23:59:59.999
+  const label = new Date(startMs).toISOString().slice(0, 10);
   return { startMs, endMs, label };
 }
 
-async function fetchJSON(url, opts={}) {
+// ---------------- helpers ----------------
+async function fetchJSON(url, opts = {}) {
   const res = await fetch(url, opts);
   if (!res.ok) throw new Error(`${url} -> ${res.status}`);
   return res.json();
@@ -52,34 +41,15 @@ async function getHeroMap() {
   for (const [id, h] of Object.entries(data)) {
     const short = h.name?.replace("npc_dota_hero_", "");
     map.set(Number(id), {
-      name: h.localized_name || short?.replaceAll("_"," ") || h.name,
+      name: h.localized_name || short?.replaceAll("_", " ") || h.name,
       img: short ? `${CDN}/apps/dota2/images/heroes/${short}_full.png` : null
     });
   }
   return map;
 }
 
-async function fetchRoleData(role, rank, fromMs, toMs) {
-  const pos = ROLE_TO_POSITION[role] ?? 2;
-  const res = await fetch(STRATZ_GQL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-      "Authorization": `Bearer ${STRATZ_TOKEN}`,
-      "Origin": "https://stratz.com",
-      "Referer": "https://stratz.com/",
-      "User-Agent": "DotaMetaBot/1.0"
-    },
-    body: JSON.stringify({ query: QUERY, variables: { from: fromMs, to: toMs, rank, pos } })
-  });
-  if (!res.ok) throw new Error(`STRATZ ${res.status}: ${await res.text()}`);
-  const body = await res.json();
-  return body?.data?.heroPerformance || [];
-}
-
 function topRows(rows, limit) {
-  const total = rows.reduce((a,b)=>a+(b.matchCount||0),0) || 1;
+  const total = rows.reduce((a, b) => a + (b.matchCount || 0), 0) || 1;
   return rows
     .map(r => ({
       id: r.heroId,
@@ -89,10 +59,81 @@ function topRows(rows, limit) {
       pick: (r.matchCount / total) * 100
     }))
     .filter(r => r.matches >= MIN_MATCHES)
-    .sort((a,b)=> b.wr - a.wr)
+    .sort((a, b) => b.wr - a.wr)
     .slice(0, limit);
 }
 
+// ---------------- GraphQL queries + robust fetch ----------------
+const QUERY_RANKED_MS = `
+  query Q($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
+    heroPerformance(request:{
+      dateTime:{ min:$from, max:$to }
+      rankBracket:[$rank]
+      positions:[$pos]
+      lobbyTypeIds:[7]
+      isParsed:true
+    }){ heroId winCount matchCount }
+  }
+`;
+
+const QUERY_UNRANKED_MS = `
+  query Q($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
+    heroPerformance(request:{
+      dateTime:{ min:$from, max:$to }
+      rankBracket:[$rank]
+      positions:[$pos]
+      isParsed:true
+    }){ heroId winCount matchCount }
+  }
+`;
+
+const QUERY_RANKED_SEC = `
+  query Q($from: Long!, $to: Long!, $rank: RankBracketType!, $pos: PositionType!) {
+    heroPerformance(request:{
+      dateTime:{ min:$from, max:$to }   # epoch v sekundách
+      rankBracket:[$rank]
+      positions:[$pos]
+      lobbyTypeIds:[7]
+      isParsed:true
+    }){ heroId winCount matchCount }
+  }
+`;
+
+async function fetchRoleData(role, rank, fromMs, toMs) {
+  const pos = ROLE_TO_POSITION[role] ?? 2;
+
+  const tries = [
+    { q: QUERY_RANKED_MS,   vars: { from: fromMs, to: toMs, rank, pos } },                              // včera ms ranked
+    { q: QUERY_UNRANKED_MS, vars: { from: fromMs, to: toMs, rank, pos } },                              // včera ms bez ranked
+    { q: QUERY_RANKED_SEC,  vars: { from: Math.floor(fromMs / 1000), to: Math.floor(toMs / 1000), rank, pos } }, // včera sec ranked
+    { q: QUERY_UNRANKED_MS, vars: { from: fromMs - 2 * 24 * 3600 * 1000, to: toMs, rank, pos } }       // posledné 3 dni ms bez ranked
+  ];
+
+  for (const t of tries) {
+    const res = await fetch(STRATZ_GQL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": `Bearer ${STRATZ_TOKEN}`,
+        "Origin": "https://stratz.com",
+        "Referer": "https://stratz.com/",
+        "User-Agent": "DotaMetaBot/1.0"
+      },
+      body: JSON.stringify({ query: t.q, variables: t.vars })
+    });
+
+    if (!res.ok) continue;
+
+    const body = await res.json().catch(() => null);
+    const rows = body?.data?.heroPerformance || [];
+    if (Array.isArray(rows) && rows.length) return rows;
+    await sleep(150);
+  }
+  return [];
+}
+
+// ---------------- HTML render ----------------
 function htmlTemplate(label, sections, heroes) {
   const css = `
     body { background:#0b0e13; color:#e6e9ef; font:14px/1.4 Inter,system-ui,Segoe UI,Roboto,Arial; padding:24px; }
@@ -114,18 +155,18 @@ function htmlTemplate(label, sections, heroes) {
   const roleName = r => ({safe:"Safe Lane",mid:"Mid",off:"Offlane",soft:"Soft Support",hard:"Hard Support"})[r]||r;
 
   const makeTable = (role, rows) => {
-    const trs = rows.map((r,i)=>{
+    const trs = rows.map((r, i) => {
       const h = heroes.get(r.id) || {};
-      const wr = (r.wr*100).toFixed(1);
+      const wr = (r.wr * 100).toFixed(1);
       const pick = Math.round(r.pick);
       const cls = r.wr >= 0.5 ? "wr good" : "wr bad";
       return `
         <tr>
-          <td style="width:34px">${String(i+1).padStart(2," ")}</td>
+          <td style="width:34px">${String(i + 1).padStart(2, " ")}</td>
           <td>
             <div class="hero">
               ${h.img ? `<img src="${h.img}" alt="${h.name}">` : ``}
-              <span>${h.name||("Hero "+r.id)}</span>
+              <span>${h.name || ("Hero " + r.id)}</span>
             </div>
           </td>
           <td class="${cls}">${wr}%</td>
@@ -151,10 +192,11 @@ function htmlTemplate(label, sections, heroes) {
   <body>
     <h1>STRATZ META • ${label} • Immortal</h1>
     <div class="grid">${columns}</div>
-    <footer>Data: STRATZ GraphQL • ranked only • generated automatically</footer>
+    <footer>Data: STRATZ GraphQL • ranked only (fallbacks applied) • generated automatically</footer>
   </body></html>`;
 }
 
+// ---------------- main flow ----------------
 async function buildImageAndSend() {
   if (!DISCORD_WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
   if (!STRATZ_TOKEN) throw new Error("Missing STRATZ_TOKEN");
@@ -164,13 +206,8 @@ async function buildImageAndSend() {
 
   const sections = [];
   for (const role of ROLES) {
-    let rows = await fetchRoleData(role, RANK, startMs, endMs);
-    if (!rows?.length) {
-      // fallback: 3-dňové okno (ak včera málo ranked dát)
-      const threeDaysAgo = startMs - 2*24*3600*1000;
-      rows = await fetchRoleData(role, RANK, threeDaysAgo, endMs).catch(()=>[]);
-    }
-    sections.push({ role, rows: topRows(rows, LIMIT) });
+    const rowsRaw = await fetchRoleData(role, RANK, startMs, endMs);
+    sections.push({ role, rows: topRows(rowsRaw, LIMIT) });
     await sleep(150);
   }
 
@@ -185,7 +222,6 @@ async function buildImageAndSend() {
   await page.screenshot({ path, type: "png", fullPage: true });
   await browser.close();
 
-  // pošli do Discordu (prečítaj PNG z disku cez fs)
   const buf = fs.readFileSync(path);
   const form = new FormData();
   form.append("payload_json", JSON.stringify({
