@@ -8,7 +8,7 @@ const SELECTOR = process.env.SCREENSHOT_SELECTOR || ""; // ak chceš, daj sem pr
 
 // Tvoje nastavenia výzoru správy
 const BOT_NAME   = "Current meta agent";
-const AVATAR_URL = "https://github.com/alek-the-creator/stratz-meta-screenshot/blob/94b289177522e83cc593958fd21b441ea1050f5a/-1x-1.jpg";
+const AVATAR_URL = "https://raw.githubusercontent.com/alek-the-creator/stratz-meta-screenshot/refs/heads/main/edited.jpg";
 const EMBED_TITLE = "Dnešná meta je:";
 const EMBED_DESC  = "Implemented with ♥ by @trauma";
 
