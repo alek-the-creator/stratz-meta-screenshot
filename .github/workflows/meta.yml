@@ -13,8 +13,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '20'   # ← bez "cache: 'npm'"
 
       - name: Install browsers (cached)
         uses: microsoft/playwright-github-action@v1
@@ -24,14 +23,9 @@ jobs:
       - name: Install deps
         run: npm install
 
-      # ⇩⇩⇩ Sem vlož kontrolný krok na secrets ⇩⇩⇩
       - name: Check STRATZ_TOKEN presence
         run: echo "Has STRATZ_TOKEN? ${{ secrets.STRATZ_TOKEN != '' }}"
 
-      - name: Check DISCORD_WEBHOOK_URL presence
-        run: echo "Has DISCORD_WEBHOOK_URL? ${{ secrets.DISCORD_WEBHOOK_URL != '' }}"
-
-      # Až potom spúšťaj skript
       - name: Run screenshot + send to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
