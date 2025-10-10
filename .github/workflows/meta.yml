@@ -8,23 +8,21 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright:v1.47.2-jammy   # Playwright image s Chromium
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'   # ← bez "cache: 'npm'"
-
-      - name: Install browsers (cached)
-        uses: microsoft/playwright-github-action@v1
-        with:
-          with-deps: true
+          node-version: '20'
 
       - name: Install deps
         run: npm install
 
-      - name: Check STRATZ_TOKEN presence
-        run: echo "Has STRATZ_TOKEN? ${{ secrets.STRATZ_TOKEN != '' }}"
+      - name: Check secrets
+        run: |
+          echo "Has STRATZ_TOKEN? ${{ secrets.STRATZ_TOKEN != '' }}"
+          echo "Has DISCORD_WEBHOOK_URL? ${{ secrets.DISCORD_WEBHOOK_URL != '' }}"
 
       - name: Run screenshot + send to Discord
         env:
