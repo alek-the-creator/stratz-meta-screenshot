@@ -3,7 +3,7 @@ name: Scheduled Web Snapshot
 on:
   schedule:
     - cron: "0 15 * * *"     # zmeň podľa seba
-    - cron: "*/10 * * * *"
+   
   workflow_dispatch:
 
 jobs:
