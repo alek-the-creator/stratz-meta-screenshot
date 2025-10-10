@@ -1,10 +1,10 @@
 {
-  "name": "stratz-meta-screenshot",
+  "name": "web-screenshot-to-discord",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "scrape": "node screenshot.js"
+    "run": "node screenshot.js"
   },
   "dependencies": {
     "playwright": "1.56.0"
