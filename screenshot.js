@@ -1,15 +1,19 @@
-// Section-screenshot -> Discord webhook (Playwright)
+// Precise section screenshot -> Discord (Playwright)
 import { chromium } from "playwright";
 import fs from "node:fs";
 
 const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
 const URL = process.env.PAGE_URL || "https://dota2protracker.com/";
+const SELECTOR =
+  process.env.SCREENSHOT_SELECTOR ||
+  'body > div:nth-child(3) > div.app-container.svelte-se84dv > div.content.svelte-se84dv > main > div > div:nth-child(3) > div';
 
 if (!WEBHOOK) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
-const VIEWPORT_W = 1600;
-const VIEWPORT_H = 1200;
-const WAIT_MS = 2500;
+const VIEWPORT_W = Number(process.env.VIEWPORT_W || 1600);
+const VIEWPORT_H = Number(process.env.VIEWPORT_H || 1200);
+const WAIT_MS    = Number(process.env.WAIT_MS || 2500);
+const PAD        = Number(process.env.CLIP_PAD || 8); // voliteľný okraj v px
 
 async function run() {
   const browser = await chromium.launch({ headless: true });
@@ -24,7 +28,7 @@ async function run() {
   await page.waitForLoadState("networkidle").catch(() => {});
   await page.waitForTimeout(WAIT_MS);
 
-  // Skús potlačiť sticky header/ads, aby nezakrývali sekciu (best-effort).
+  // potlač sticky/ads (ak by prekrývali sekciu)
   await page.addStyleTag({
     content: `
       header, .sticky, .fixed, [class*="sticky"], [class*="Fixed"], [class*="fixed"] { z-index: 0 !important; }
@@ -32,29 +36,35 @@ async function run() {
     `
   }).catch(()=>{});
 
-  // Lokátory kontajnera so sekciou "Most Successful Heroes by Role"
-  const section = page.locator([
-    'section:has(h2:has-text("Most Successful Heroes by Role"))',
-    'section:has(h3:has-text("Most Successful Heroes by Role"))',
-    'div:has(h2:has-text("Most Successful Heroes by Role"))',
-    'div:has(h3:has-text("Most Successful Heroes by Role"))'
-  ].join(', ')).first();
-
+  const el = page.locator(SELECTOR).first();
   const path = "shot.png";
 
   try {
-    if (await section.count()) {
-      await section.scrollIntoViewIfNeeded();
-      // malá pauza na layout/animácie
-      await page.waitForTimeout(300);
-      // ELEMENT screenshot – Playwright sám poscrolluje a oreže presne kontajner
-      await section.screenshot({ path, type: "png" });
+    if (await el.count()) {
+      await el.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+
+      // element screenshot je najpresnejší; ak chceš pad, spravíme clip cez boundingClientRect
+      if (PAD > 0) {
+        const handle = await el.elementHandle();
+        const clip = await page.evaluate((node, pad) => {
+          const r = node.getBoundingClientRect();
+          return {
+            x: Math.max(0, r.x - pad),
+            y: Math.max(0, r.y - pad),
+            width: Math.min(window.innerWidth - r.x + pad, r.width + pad * 2),
+            height: Math.min(window.innerHeight - r.y + pad, r.height + pad * 2)
+          };
+        }, handle, PAD);
+        await page.screenshot({ path, type: "png", clip });
+      } else {
+        await el.screenshot({ path, type: "png" });
+      }
     } else {
-      // ak by nadpis zmenili, sprav aspoň fullpage fallback
+      // ak selektor nič nenašiel, sprav fallback + dáme vedieť
       await page.screenshot({ path, type: "png", fullPage: true });
     }
-  } catch (e) {
-    // posledný fallback
+  } catch {
     await page.screenshot({ path, type: "png", fullPage: true });
   }
 
@@ -63,14 +73,19 @@ async function run() {
   // pošli do Discordu
   const buf = fs.readFileSync(path);
   const form = new FormData();
-  form.append("payload_json", JSON.stringify({
-    username: "Web Snapshot",
-    embeds: [{
-      title: "Most Successful Heroes by Role — dota2protracker.com",
-      description: URL,
-      image: { url: "attachment://shot.png" }
-    }]
-  }));
+  form.append(
+    "payload_json",
+    JSON.stringify({
+      username: "Web Snapshot",
+      embeds: [
+        {
+          title: "Section snapshot",
+          description: `URL: ${URL}\nSelector: \`${SELECTOR}\``,
+          image: { url: "attachment://shot.png" }
+        }
+      ]
+    })
+  );
   form.append("file", new Blob([buf], { type: "image/png" }), "shot.png");
 
   const res = await fetch(WEBHOOK, { method: "POST", body: form });
