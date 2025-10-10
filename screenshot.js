@@ -1,5 +1,4 @@
 // Section-screenshot -> Discord webhook (Playwright)
-// Env: DISCORD_WEBHOOK_URL, PAGE_URL
 import { chromium } from "playwright";
 import fs from "node:fs";
 
@@ -8,9 +7,9 @@ const URL = process.env.PAGE_URL || "https://dota2protracker.com/";
 
 if (!WEBHOOK) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
-const VIEWPORT_W = 1500;   // tuniť podľa potreby
-const VIEWPORT_H = 1100;
-const WAIT_MS = 2500;      // dáme stránke čas natiahnuť dáta
+const VIEWPORT_W = 1600;
+const VIEWPORT_H = 1200;
+const WAIT_MS = 2500;
 
 async function run() {
   const browser = await chromium.launch({ headless: true });
@@ -25,50 +24,37 @@ async function run() {
   await page.waitForLoadState("networkidle").catch(() => {});
   await page.waitForTimeout(WAIT_MS);
 
-  // Skúsime zavrieť prípadné bannery (best-effort, nevadí ak zlyhá)
-  for (const sel of [
-    'button:has-text("Accept")',
-    'button:has-text("I Agree")',
-    'button:has-text("Got it")',
-    'div[role="dialog"] button'
-  ]) { try { const b = page.locator(sel).first(); if (await b.count()) await b.click({ timeout: 500 }).catch(()=>{}); } catch {} }
+  // Skús potlačiť sticky header/ads, aby nezakrývali sekciu (best-effort).
+  await page.addStyleTag({
+    content: `
+      header, .sticky, .fixed, [class*="sticky"], [class*="Fixed"], [class*="fixed"] { z-index: 0 !important; }
+      [aria-label*="ad"], .ad, .ads, [id*="ad"] { display:none !important; }
+    `
+  }).catch(()=>{});
+
+  // Lokátory kontajnera so sekciou "Most Successful Heroes by Role"
+  const section = page.locator([
+    'section:has(h2:has-text("Most Successful Heroes by Role"))',
+    'section:has(h3:has-text("Most Successful Heroes by Role"))',
+    'div:has(h2:has-text("Most Successful Heroes by Role"))',
+    'div:has(h3:has-text("Most Successful Heroes by Role"))'
+  ].join(', ')).first();
 
   const path = "shot.png";
 
   try {
-    // nájde nadpis a spodný text
-    const title = page.locator('text=Most Successful Heroes by Role').first();
-    const bottom = page.locator('text=/Find an in-depth analysis of all heroes/i').first();
-
-    if (await title.count() && await bottom.count()) {
-      // spočítaj najbližšieho spoločného predka a jeho bounding box
-      const [tHandle, bHandle] = await Promise.all([title.elementHandle(), bottom.elementHandle()]);
-      const clip = await page.evaluate((t, b) => {
-        function ancestors(el){ const a=[]; while(el){ a.push(el); el = el.parentElement; } return a; }
-        const ta = ancestors(t), ba = ancestors(b);
-        const set = new Set(ta);
-        const common = ba.find(el => set.has(el)) || document.body;
-        const r = common.getBoundingClientRect();
-        // trochu orežeme okraje
-        const pad = 12;
-        return {
-          x: Math.max(0, r.x - pad),
-          y: Math.max(0, r.y - pad),
-          width: Math.min(window.innerWidth - r.x + pad, r.width + pad*2),
-          height: Math.min(window.innerHeight - r.y + pad, r.height + pad*2)
-        };
-      }, tHandle, bHandle);
-
-      // Posuň sa, aby bol klip určite vo viewporte
-      await title.scrollIntoViewIfNeeded().catch(()=>{});
+    if (await section.count()) {
+      await section.scrollIntoViewIfNeeded();
+      // malá pauza na layout/animácie
       await page.waitForTimeout(300);
-
-      await page.screenshot({ path, type: "png", clip });
+      // ELEMENT screenshot – Playwright sám poscrolluje a oreže presne kontajner
+      await section.screenshot({ path, type: "png" });
     } else {
-      // fallback – celý page
+      // ak by nadpis zmenili, sprav aspoň fullpage fallback
       await page.screenshot({ path, type: "png", fullPage: true });
     }
-  } catch {
+  } catch (e) {
+    // posledný fallback
     await page.screenshot({ path, type: "png", fullPage: true });
   }
 
@@ -97,8 +83,11 @@ run().catch(async (e) => {
     await fetch(WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Web Snapshot", embeds: [{ title: "Snapshot error", description: String(e) }] })
-    }).catch(()=>{});
+      body: JSON.stringify({
+        username: "Web Snapshot",
+        embeds: [{ title: "Snapshot error", description: String(e) }]
+      })
+    }).catch(() => {});
   }
   process.exit(1);
 });
