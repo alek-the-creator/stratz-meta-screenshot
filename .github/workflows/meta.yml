@@ -1,31 +1,23 @@
-name: Daily STRATZ Meta Screenshot
+name: Scheduled Web Snapshot
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # 07:00 UTC
+    - cron: "0 7 * * *"     # zmeň podľa seba
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    container: mcr.microsoft.com/playwright:v1.56.0-jammy  # ⚠️ zosúladené s deps
+    container: mcr.microsoft.com/playwright:v1.56.0-jammy
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: npm install
 
-      - name: Install deps
-        run: npm install
-
-      - name: Check secrets
-        run: |
-          echo "Has STRATZ_TOKEN? ${{ secrets.STRATZ_TOKEN != '' }}"
-          echo "Has DISCORD_WEBHOOK_URL? ${{ secrets.DISCORD_WEBHOOK_URL != '' }}"
-
-      - name: Run screenshot + send to Discord
+      - name: Run screenshot and send to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          STRATZ_TOKEN: ${{ secrets.STRATZ_TOKEN }}
+          PAGE_URL: "https://dota2protracker.com/"
         run: node screenshot.js
