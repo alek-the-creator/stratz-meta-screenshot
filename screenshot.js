@@ -6,7 +6,8 @@ const WEBHOOK   = process.env.DISCORD_WEBHOOK_URL;
 const PAGE_URL  = process.env.PAGE_URL || "https://dota2protracker.com/";
 const SELECTOR  = process.env.SCREENSHOT_SELECTOR || ""; // voliteľne: presný CSS selektor
 
-// Tvoja identita bota a texty
+
+// Tvoja identita bota a texty 1
 const BOT_NAME    = "Current meta agent";
 const AVATAR_URL  = "https://raw.githubusercontent.com/alek-the-creator/stratz-meta-screenshot/main/edited.jpg";
 const EMBED_TITLE = "Dnešná meta je:";
