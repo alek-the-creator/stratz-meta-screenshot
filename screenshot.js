@@ -256,7 +256,21 @@ export async function sendScreenshot(webhook, png, metadata, { request = fetch, 
     }
     if (!response.ok) throw new Error(`Discord returned HTTP ${response.status}; no error message was posted`);
     const receipt = await response.json().catch(() => null);
-    if (!receipt?.id || !receipt.attachments?.some((a) => a.filename === "meta.png")) {
+    // Discord can consume an attachment into the embed and return an empty attachments array.
+    // See https://github.com/discord/discord-api-docs/discussions/3231
+    const attached = receipt?.attachments?.some((a) => a.filename === "meta.png");
+    const embedded = receipt?.embeds?.some((embed) => {
+      try {
+        const image = embed.image;
+        const imageUrl = new URL(image.url);
+        return imageUrl.protocol === "https:" &&
+          ["cdn.discordapp.com", "media.discordapp.net"].includes(imageUrl.hostname) &&
+          /^\/attachments\/.*\/meta\.png$/.test(imageUrl.pathname) &&
+          (image.width === undefined || Math.abs(image.width - metadata.width) <= 2) &&
+          (image.height === undefined || Math.abs(image.height - metadata.height) <= 2);
+      } catch { return false; }
+    });
+    if (!receipt?.id || (!attached && !embedded)) {
       throw new Error("Discord did not confirm the image attachment; not retrying an ambiguous POST");
     }
     return receipt.id;
