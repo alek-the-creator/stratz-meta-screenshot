@@ -180,3 +180,24 @@ test("Discord timeout/500/missing acknowledgement are not retried or posted as e
   await assert.rejects(sendScreenshot("https://discord.com/api/webhooks/test/fake", Buffer.from("bad"), info, { request: async () => { requests++; } }));
   assert.equal(requests, 0);
 });
+
+test("Discord may return an embedded CDN image with no standalone attachments", async () => {
+  const target = await prepareMeta(page);
+  const info = await target.evaluate(inspectMetaElement);
+  const png = await target.screenshot();
+  for (const host of ["cdn.discordapp.com", "media.discordapp.net"]) {
+    const id = await sendScreenshot("https://discord.com/api/webhooks/test/fake", png, info, {
+      request: async () => Response.json({ id: "456", attachments: [], embeds: [{ image: {
+        url: `https://${host}/attachments/123/456/meta.png?ex=example`, width: info.width, height: info.height,
+      } }] }),
+    });
+    assert.equal(id, "456");
+  }
+  for (const image of [
+    { url: "https://example.com/attachments/123/456/meta.png" },
+    { url: "https://cdn.discordapp.com/attachments/123/456/other.png" },
+    { url: "https://cdn.discordapp.com/attachments/123/456/meta.png", width: 1600, height: 4000 },
+  ]) await assert.rejects(sendScreenshot("https://discord.com/api/webhooks/test/fake", png, info, {
+    request: async () => Response.json({ id: "456", attachments: [], embeds: [{ image }] }),
+  }), /did not confirm/);
+});
