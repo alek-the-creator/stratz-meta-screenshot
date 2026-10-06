@@ -5,10 +5,23 @@ on:
     - cron: "0 7 * * *"     # zmeň podľa seba
    
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate and save the meta image without posting to Discord'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-meta-snapshot
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     container: mcr.microsoft.com/playwright:v1.56.0-jammy
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +30,21 @@ jobs:
           node-version: '20'
       - run: npm install
 
+      - name: Regression tests (no Discord requests)
+        run: npm test
+
       - name: Run screenshot and send to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PAGE_URL: "https://dota2protracker.com/"
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
         run: node screenshot.js
+
+      - name: Save validated image and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-snapshot-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
